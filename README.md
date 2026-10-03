@@ -1,5 +1,10 @@
 # ReCaVSR
 
+Official inference code for [ReCaVSR: One-Step Streaming Diffusion Video
+Super-Resolution with Recycled Latents and Learned Cache Routing](https://arxiv.org/abs/2609.37831).
+
+Authors: Xijun Wang, Xin Li, Suhang Yao, Zirui Lang, Bingchen Li, and Zhibo Chen.
+
 ## Installation
 
 Linux x86-64, Python 3.11–3.13, and an NVIDIA GPU with a CUDA 13.0-compatible driver
@@ -89,3 +94,7 @@ retained in the source files.
 
 The code is released under the Apache License 2.0.
 Model weights and demo footage remain subject to their respective licenses.
+
+## Branches
+
+`main` is the public release. `anonymous` preserves the anonymous code snapshot.
