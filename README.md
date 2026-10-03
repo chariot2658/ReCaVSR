@@ -1,100 +1,136 @@
 # ReCaVSR
 
-Official inference code for [ReCaVSR: One-Step Streaming Diffusion Video
-Super-Resolution with Recycled Latents and Learned Cache Routing](https://arxiv.org/abs/2609.37831).
+**ReCaVSR: One-Step Streaming Diffusion Video Super-Resolution with Recycled Latents and Learned Cache Routing**
 
-Authors: Xijun Wang, Xin Li, Suhang Yao, Zirui Lang, Bingchen Li, and Zhibo Chen.
+Xijun Wang, Xin Li, Suhang Yao, Zirui Lang, Bingchen Li, and Zhibo Chen
 
-## Installation
+[Paper](https://arxiv.org/abs/2609.37831) · [Pretrained models](https://huggingface.co/kopper/ReCaVSR) · [Code](https://github.com/kopperx/ReCaVSR)
 
-Linux x86-64, Python 3.11–3.13, and an NVIDIA GPU with a CUDA 13.0-compatible driver
-are required. Install [uv](https://docs.astral.sh/uv/getting-started/installation/),
-then run from the repository root:
+ReCaVSR is a one-step streaming video super-resolution method built on Wan2.2. It
+reuses previously generated super-resolution latents, assigns different temporal
+cache scopes to transformer layers, and decodes with a low-resolution-conditioned
+FlashDecoder. This repository provides the inference code and links to pretrained
+weights. Training and evaluation pipelines are not included in this release.
 
-```bash
-uv sync --locked
-```
+## Visual Results
 
-## Pretrained Models
-
-Model repository: [kopper/ReCaVSR](https://huggingface.co/kopper/ReCaVSR)
-on Hugging Face. Checkpoint files are downloaded separately and are not included
-in this code repository.
-
-The three JSON configuration files are included in this code repository under
-`checkpoints/`; they do not need to be downloaded from Hugging Face.
-Download only the weights **before running inference**:
-
-```bash
-uvx hf download kopper/ReCaVSR \
-  transformer.safetensors prompt.safetensors flashdecoder.safetensors \
-  --local-dir checkpoints
-```
-
-
-```text
-checkpoints/
-├── transformer.safetensors
-├── model_config.json        
-├── prompt.safetensors
-├── vae_config.json            
-├── flashdecoder.safetensors
-└── flashdecoder_config.json 
-```
-
-Use the bundled JSON files that match the checkpoint release. If you use a
-different `--model-dir`, copy these three JSON files into that directory as well.
-The DiT checkpoint is already merged; no conversion or merging is required.
+> **TODO:** Add a short side-by-side input/output video. The bundled
+> `assets/demo/input.mp4` is the input for the example below.
 
 ## Quick Start
 
-After downloading the pretrained models:
+**Requirements:** Linux x86-64, Python 3.11–3.13, an NVIDIA GPU, and a CUDA
+13.0-compatible driver. Install [uv](https://docs.astral.sh/uv/getting-started/installation/)
+before running these commands.
 
-```bash
-uv run python inference.py \
-  --input assets/demo/input.mp4 \
-  --output outputs/demo_x4.mp4 \
-  --scale 4
-```
+1. Clone the repository and install the locked dependencies:
 
-Useful options:
+   ```bash
+   git clone https://github.com/kopperx/ReCaVSR.git
+   cd ReCaVSR
+   uv sync --locked
+   ```
 
-- `--scale 2` or `--scale 1.5`: change the spatial upscaling factor.
-- `--device cuda:1`: select a GPU.
-- `--color-fix wavelet` or `--color-fix adain`: enable color correction.
-- `--model-dir /path/to/checkpoints`: use a different download directory.
-- `--frames 31`: run a short preview before processing the full demo.
+2. Download the default model weights into `checkpoints/`:
 
-Compilation is enabled by default, so the first run takes longer.
-Use `--no-compile-blocks --no-compile-decoder` to disable it.
-Input may also be a numbered image directory; use `--fps` to set its playback rate.
-See `uv run python inference.py --help` for all options.
+   ```bash
+   uvx hf download kopper/ReCaVSR \
+     transformer.safetensors prompt.safetensors flashdecoder.safetensors \
+     --local-dir checkpoints
+   ```
 
-### Optional Wan Decoder
+3. Run a 31-frame preview:
 
-To use the original Wan decoder instead of FlashDecoder, also download:
+   ```bash
+   uv run python inference.py \
+     --input assets/demo/input.mp4 \
+     --output outputs/demo_preview_x4.mp4 \
+     --scale 4 \
+     --frames 31
+   ```
+
+The first run may take longer because compilation is enabled by default. To
+process the full demo, omit `--frames` and choose a new `--output` path; the
+script does not overwrite existing results.
+
+## Pretrained Models
+
+The [Hugging Face repository](https://huggingface.co/kopper/ReCaVSR) hosts the
+weights. The matching JSON configuration files are already in `checkpoints/`.
+
+| Weight file | Role | Needed for |
+| --- | --- | --- |
+| `transformer.safetensors` | Merged diffusion transformer | All runs |
+| `prompt.safetensors` | Prompt embedding | All runs |
+| `flashdecoder.safetensors` | Low-resolution-conditioned decoder | Default decoder |
+| `vae.safetensors` | Original Wan decoder | Optional `--decoder wan` |
+
+The transformer checkpoint is already merged; no adapter conversion is needed.
+If you use a different `--model-dir`, copy `model_config.json`, `vae_config.json`,
+and `flashdecoder_config.json` into it as well.
+
+For the optional Wan decoder, download its weight and pass `--decoder wan` to
+the inference command:
 
 ```bash
 uvx hf download kopper/ReCaVSR vae.safetensors --local-dir checkpoints
 ```
 
-Then add `--decoder wan` to the inference command.
+## Inference Options
 
-Model computation is streaming; the current video reader and writer buffer the
-clip in CPU memory. Outputs preserve frame count, contain no audio, and do not
-overwrite existing files.
+- `--scale 2` or `--scale 1.5` changes the spatial upscaling factor.
+- `--device cuda:1` selects a different GPU.
+- `--color-fix wavelet` or `--color-fix adain` enables color correction.
+- `--model-dir /path/to/checkpoints` selects another model directory.
+- `--frames 31` limits the run to a short preview.
+- `--no-compile-blocks --no-compile-decoder` disables compilation.
+
+Input may also be a numbered image directory; use `--fps` to set its playback
+rate. See `uv run python inference.py --help` for the full CLI reference.
+
+## Method at a Glance
+
+1. **Recycled latents:** predictions from earlier blocks provide local temporal
+   context to later blocks.
+2. **Layer-wise cache routing:** transformer layers use different history scopes
+   under a fixed cache budget.
+3. **LR-conditioned FlashDecoder:** low-resolution observations help decode the
+   generated latents efficiently.
+
+For the architecture and experiments, see the [paper](https://arxiv.org/abs/2609.37831).
+
+## Scope and Limitations
+
+- The runtime requires a CUDA GPU and uses one GPU per inference process.
+- Model inference is streaming, while the current reader and writer buffer the
+  entire clip in CPU memory.
+- Output preserves the input frame count but does not contain audio.
+- The script writes an MP4 and a JSON run report, and refuses to overwrite
+  either existing output.
+
+## Citation
+
+If ReCaVSR is useful in your research, please cite the paper:
+
+```bibtex
+@misc{wang2026recavsronestepstreamingdiffusion,
+  title={ReCaVSR: One-Step Streaming Diffusion Video Super-Resolution with Recycled Latents and Learned Cache Routing},
+  author={Xijun Wang and Xin Li and Suhang Yao and Zirui Lang and Bingchen Li and Zhibo Chen},
+  year={2026},
+  eprint={2609.37831},
+  archivePrefix={arXiv},
+  primaryClass={cs.CV},
+  url={https://arxiv.org/abs/2609.37831}
+}
+```
 
 ## Acknowledgements
 
 This project builds on Wan and Hugging Face Diffusers. Color correction follows
-[StableSR](https://github.com/IceClear/StableSR). Upstream copyright notices are
-retained in the source files.
+[StableSR](https://github.com/IceClear/StableSR). Upstream copyright notices
+are retained in the source files.
 
 ## License
 
-The code is released under the Apache License 2.0.
-Model weights and demo footage remain subject to their respective licenses.
-
-## Branches
-
-`main` is the public release. `anonymous` preserves the anonymous code snapshot.
+The code is released under the [Apache License 2.0](LICENSE). Model weights and
+demo footage remain subject to their respective licenses.
