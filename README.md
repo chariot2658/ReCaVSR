@@ -127,8 +127,7 @@ If ReCaVSR is useful in your research, please cite the paper:
 ## Acknowledgements
 
 This project builds on Wan and Hugging Face Diffusers. Color correction follows
-[StableSR](https://github.com/IceClear/StableSR). Upstream copyright notices
-are retained in the source files.
+[StableSR](https://github.com/IceClear/StableSR).
 
 ## License
 
