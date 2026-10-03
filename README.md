@@ -16,10 +16,10 @@ weights. Training and evaluation pipelines are not included in this release.
 
 | Low-resolution input | ReCaVSR output (4×) |
 | :---: | :---: |
-| <a href="https://kopperx.github.io/ReCaVSR/assets/demo/"><img src="assets/demo/input-poster.jpg" width="320" alt="Low-resolution input video"></a> | <a href="https://kopperx.github.io/ReCaVSR/assets/demo/"><img src="assets/demo/output-poster.jpg" width="320" alt="ReCaVSR output video"></a> |
+| https://github.com/user-attachments/assets/e78d3868-b06e-4a57-b025-fac737351230 | https://github.com/user-attachments/assets/da6ef150-e0ce-4f4d-bbd5-afb0858c588f |
 
-Click either image to play the full 361-frame videos side by side. The source
-MP4s are also available here: [input](assets/demo/input.mp4) ·
+Both videos retain all 361 frames at their original pixel scale after cropping
+the bottom label. Source MP4s: [input](assets/demo/input.mp4) ·
 [output](assets/demo/output.mp4).
 
 ## Quick Start
