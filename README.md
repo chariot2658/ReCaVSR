@@ -17,7 +17,7 @@ uv sync --locked
 
 ## Pretrained Models
 
-Model repository: [anonyaa/ReCaVSR](https://huggingface.co/anonyaa/ReCaVSR)
+Model repository: [kopper/ReCaVSR](https://huggingface.co/kopper/ReCaVSR)
 on Hugging Face. Checkpoint files are downloaded separately and are not included
 in this code repository.
 
@@ -26,7 +26,7 @@ The three JSON configuration files are included in this code repository under
 Download only the weights **before running inference**:
 
 ```bash
-uvx hf download anonyaa/ReCaVSR \
+uvx hf download kopper/ReCaVSR \
   transformer.safetensors prompt.safetensors flashdecoder.safetensors \
   --local-dir checkpoints
 ```
@@ -75,7 +75,7 @@ See `uv run python inference.py --help` for all options.
 To use the original Wan decoder instead of FlashDecoder, also download:
 
 ```bash
-uvx hf download anonyaa/ReCaVSR vae.safetensors --local-dir checkpoints
+uvx hf download kopper/ReCaVSR vae.safetensors --local-dir checkpoints
 ```
 
 Then add `--decoder wan` to the inference command.
