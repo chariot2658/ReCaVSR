@@ -1,0 +1,61 @@
+{
+  "patch_size": [
+    1,
+    2,
+    2
+  ],
+  "num_attention_heads": 24,
+  "attention_head_dim": 128,
+  "in_channels": 48,
+  "out_channels": 48,
+  "text_dim": 4096,
+  "freq_dim": 256,
+  "ffn_dim": 14336,
+  "num_layers": 30,
+  "cross_attn_norm": true,
+  "qk_norm": "rms_norm_across_heads",
+  "eps": 0.000001,
+  "rope_max_seq_len": 1024,
+  "lq_proj_hidden_dim1": 2048,
+  "lq_proj_hidden_dim2": 3072,
+  "use_block_causal_attention": true,
+  "static_kv_router": {
+    "anchor": {
+      "capacity_latents": 2,
+      "initial_index": 5,
+      "stride_latents": 6
+    },
+    "layer_actions": [
+      "none",
+      "none",
+      "recent_1",
+      "none",
+      "recent_2",
+      "none",
+      "recent_2",
+      "recent_4",
+      "none",
+      "recent_2_anchor",
+      "recent_4",
+      "recent_4_anchor",
+      "recent_2",
+      "recent_4_anchor",
+      "anchor",
+      "recent_4_anchor",
+      "recent_2",
+      "recent_4_anchor",
+      "recent_2_anchor",
+      "recent_4",
+      "recent_2",
+      "none",
+      "recent_2_anchor",
+      "recent_2",
+      "none",
+      "recent_2",
+      "none",
+      "recent_1",
+      "none",
+      "none"
+    ]
+  }
+}

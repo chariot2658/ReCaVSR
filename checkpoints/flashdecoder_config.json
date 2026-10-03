@@ -1,0 +1,8 @@
+{
+  "variant": "S",
+  "window_size": 2,
+  "spatial_window_size": [
+    24,
+    24
+  ]
+}
