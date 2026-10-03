@@ -14,8 +14,11 @@ weights. Training and evaluation pipelines are not included in this release.
 
 ## Visual Results
 
-> **TODO:** Add a short side-by-side input/output video. The bundled
-> `assets/demo/input.mp4` is the input for the example below.
+| Low-resolution input | ReCaVSR output (4×) |
+| :---: | :---: |
+| [![Low-resolution input video preview](assets/demo/input.gif)](assets/demo/input.mp4) | [![ReCaVSR output video preview](assets/demo/output.gif)](assets/demo/output.mp4) |
+
+Click either preview to watch the full video.
 
 ## Quick Start
 
