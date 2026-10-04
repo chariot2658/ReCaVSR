@@ -158,6 +158,7 @@ class TransformerSession:
         compile_blocks=False,
         compile_mode="default",
         native_norms=False,
+        fp8_linears=False,
     ):
         if (
             height % SPATIAL_TOKEN_STRIDE
@@ -211,6 +212,10 @@ class TransformerSession:
                 ).eval()
             )
             drop_cross_attention_kv(b)
+            if fp8_linears:
+                from .fp8 import quantize_block_linears
+
+                quantize_block_linears(b)
             if i in self.streamer.position:
                 self.streamer.offload(i)
                 torch.cuda.empty_cache()

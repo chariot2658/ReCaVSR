@@ -89,6 +89,11 @@ uvx hf download kopper/ReCaVSR vae.safetensors --local-dir checkpoints
 - `--model-dir /path/to/checkpoints` selects another model directory.
 - `--frames 31` limits the run to a short preview.
 - `--no-compile-blocks --no-compile-decoder` disables compilation.
+- `--fp8-dit` enables faster, lossy FP8 calculations in DiT linears on NVIDIA
+  GPUs with compute capability 8.9 or later. It requires compiled blocks;
+  attention, KV caches and the decoder keep their original precision. Strip
+  intermediates use `.fp8.stripN.mp4` names so BF16 strips are never reused by
+  an FP8 run. The original checkpoints are unchanged.
 
 Input may also be a numbered image directory; use `--fps` to set its playback
 rate. See `uv run python inference.py --help` for the full CLI reference.
