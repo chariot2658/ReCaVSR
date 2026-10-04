@@ -27,10 +27,13 @@ from recavsr_infer.runtime.offload import plan_gpu_blocks
 from recavsr_infer.runtime.transformer import TransformerSession
 from recavsr_infer.strips import blend_strips, strip_columns
 from recavsr_infer.video import (
+    BackgroundWriter,
     VideoWriter,
+    block_tensor,
+    enlarge_block,
     iter_blocks,
     open_video,
-    prepare_block,
+    prefetch,
     rgb_uint8,
     scaled_size,
     validate_scale,
@@ -137,6 +140,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--only-strip", type=int, help=argparse.SUPPRESS)
     parser.add_argument(
+        "--no-blend",
+        action="store_true",
+        help="With --strips: stop after writing OUTPUT_STEM.stripK.mp4, leaving the "
+        "blend to the caller (e.g. while the GPU runs the next video).",
+    )
+    parser.add_argument(
         "--strip-crf",
         type=int,
         default=8,
@@ -177,6 +186,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--output-size must be positive.")
     if args.strips < 1 or args.strip_overlap < 1:
         parser.error("--strips and --strip-overlap must be positive.")
+    if args.no_blend and args.strips < 2:
+        parser.error("--no-blend requires --strips.")
     if args.strips > 1 and args.output_size is not None:
         parser.error("--strips uses --scale; set the final size with --resize.")
     if args.resize is not None and min(args.resize) < 1:
@@ -231,19 +242,19 @@ def report_memory(device, stats) -> None:
 
 
 def run_video(blocks, writer, transformer, decoder, args, device, height, width, stats):
-    """Stream one video's blocks through the DiT and decoder into writer."""
+    """Stream one video's blocks through the DiT and decoder into writer.
+
+    Decoding and upsampling the next block run on a background thread, so the
+    GPU only waits for the host-to-device copy.
+    """
     start_time = time.perf_counter()
-    for start, chunk, block in blocks:
+    staged = (
+        (start, chunk, block, enlarge_block(chunk, (height, width), pin=True))
+        for start, chunk, block in blocks
+    )
+    for start, chunk, block, enlarged in prefetch(staged):
         valid = len(chunk)
-        lq = prepare_block(
-            chunk,
-            0,
-            valid,
-            block,
-            device=device,
-            scale=args.scale,
-            size=(height, width),
-        )
+        lq = block_tensor(enlarged, block, device=device)
         dit_start, dit_end, decode_end = [
             torch.cuda.Event(enable_timing=True) for _ in range(3)
         ]
@@ -419,7 +430,9 @@ def main() -> None:
             else:
                 target, crf, preset = args.output, args.crf, args.preset
             staged = target.with_name(target.stem + ".part" + target.suffix)
-            writer = VideoWriter(staged, rate, height, width, crf=crf, preset=preset)
+            writer = BackgroundWriter(
+                VideoWriter(staged, rate, height, width, crf=crf, preset=preset)
+            )
             try:
                 run_video(
                     iter_blocks(frames),
@@ -434,7 +447,7 @@ def main() -> None:
                 )
                 writer.close()
             except BaseException:
-                writer.output.close()
+                writer.abort()
                 staged.unlink(missing_ok=True)
                 raise
             if args.strips == 1 and args.resize is not None:
@@ -445,7 +458,7 @@ def main() -> None:
         if todo:
             torch.cuda.synchronize(device)
     gpu_seconds = time.perf_counter() - start_time
-    if args.only_strip is not None:
+    if args.only_strip is not None or args.no_blend:
         return
     if args.strips > 1:
         print(f"blending {len(columns)} strips", flush=True)

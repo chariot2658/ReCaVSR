@@ -7,15 +7,18 @@ linear feathering across the overlap hides it.
 
 from __future__ import annotations
 
+import argparse
 import math
+import sys
 from collections.abc import Iterator
+from pathlib import Path
 
 import av
 import cv2
 import numpy as np
 
 from .runtime.constants import SPATIAL_TOKEN_STRIDE
-from .video import ffmpeg_rgb_frames
+from .frames import ffmpeg_rgb_frames, scaled_size
 
 
 def strip_columns(
@@ -94,3 +97,34 @@ def blend_strips(
         if resize is not None and (resize[0], resize[1]) != (width, height):
             out = cv2.resize(out, tuple(resize), interpolation=cv2.INTER_AREA)
         yield out
+
+
+def main(argv: list[str] | None = None) -> None:
+    """Blend strips written by inference.py --strips N --no-blend to raw RGB24 on stdout.
+
+    Lets the caller pipe frames straight into its own encoder, off the GPU's
+    critical path.
+    """
+    parser = argparse.ArgumentParser(description=main.__doc__)
+    parser.add_argument("strips", nargs="+", type=Path, help="Strip videos, left to right.")
+    parser.add_argument("--input-width", type=int, required=True, help="LQ frame width.")
+    parser.add_argument("--scale", type=float, default=4.0)
+    parser.add_argument("--strip-overlap", type=int, default=48, help="In LQ pixels.")
+    parser.add_argument("--resize", nargs=2, type=int, metavar=("W", "H"))
+    args = parser.parse_args(argv)
+    if len(args.strips) < 2:
+        parser.error("Need at least two strips.")
+    columns = strip_columns(
+        args.input_width, len(args.strips), args.strip_overlap, args.scale
+    )
+    with av.open(str(args.strips[0])) as probe:
+        height = probe.streams.video[0].height
+    width = scaled_size(1, args.input_width, args.scale)[1]
+    out = sys.stdout.buffer
+    for frame in blend_strips(args.strips, columns, args.scale, height, width, args.resize):
+        out.write(memoryview(np.ascontiguousarray(frame)))
+    out.flush()
+
+
+if __name__ == "__main__":
+    main()

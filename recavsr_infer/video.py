@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import itertools
 import math
+import queue
 import re
-import subprocess
+import threading
 from collections.abc import Iterator
 from fractions import Fraction
 from pathlib import Path
@@ -16,34 +17,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from .frames import SWS_ACCURATE, ffmpeg_rgb_frames, scaled_size, validate_scale  # noqa: F401
 from .runtime.constants import BODY_RGB_FRAMES, PREFIX_RGB_FRAMES, SPATIAL_TOKEN_STRIDE
-
-
-def validate_scale(scale):
-    """Return a finite positive spatial scale (time is never resampled)."""
-    if isinstance(scale, bool):
-        raise ValueError("Scale must be a finite positive number.")
-    try:
-        scale = float(scale)
-    except (TypeError, ValueError, OverflowError) as error:
-        raise ValueError("Scale must be a finite positive number.") from error
-    if not math.isfinite(scale) or scale <= 0:
-        raise ValueError("Scale must be a finite positive number.")
-    return scale
-
-
-def scaled_size(height, width, scale=4.0):
-    """Round each scaled dimension half-up, shared by preparation and cropping."""
-    scale = validate_scale(scale)
-    if height < 1 or width < 1:
-        raise ValueError("Input dimensions must be positive.")
-    dimensions = (height * scale, width * scale)
-    if any(not math.isfinite(x) or x > 2**31 - 1 for x in dimensions):
-        raise ValueError("Scaled dimensions exceed the supported integer range.")
-    result = tuple(math.floor(x + 0.5) for x in dimensions)
-    if min(result) < 1:
-        raise ValueError("Scale produces an empty output dimension.")
-    return result
 
 
 def video_pixel_format(height, width):
@@ -109,50 +84,6 @@ def open_video(
     return frames, rate
 
 
-# swscale's default YUV->RGB path truncates, darkening every decode by ~1 level
-# (PyAV's to_ndarray included, and it cannot request other flags). Encoding is
-# unbiased, so only decoding goes through the ffmpeg CLI with accurate rounding.
-SWS_ACCURATE = "accurate_rnd+full_chroma_int+bitexact"
-
-
-def ffmpeg_rgb_frames(path, width, height, *, limit=None) -> Iterator[np.ndarray]:
-    """Decode a video's frames to RGB uint8 [H,W,3] with accurate rounding."""
-    command = [
-        "ffmpeg",
-        "-v",
-        "error",
-        "-i",
-        str(path),
-        "-map",
-        "0:v:0",
-        "-an",
-        "-fps_mode",
-        "passthrough",
-        "-sws_flags",
-        SWS_ACCURATE,
-    ]
-    if limit is not None:
-        command += ["-frames:v", str(limit)]
-    command += ["-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
-    size = width * height * 3
-    process = subprocess.Popen(command, stdout=subprocess.PIPE, bufsize=size * 4)
-    try:
-        while True:
-            data = process.stdout.read(size)
-            if not data:
-                break
-            if len(data) != size:
-                raise RuntimeError(f"Truncated frame while decoding {path}.")
-            yield np.frombuffer(data, np.uint8).reshape(height, width, 3)
-        if process.wait() != 0:
-            raise RuntimeError(f"ffmpeg failed to decode {path}.")
-    finally:
-        if process.poll() is None:
-            process.kill()
-            process.wait()
-        process.stdout.close()
-
-
 def read_video(
     path: str | Path, *, fps: float | None = None, limit: int | None = None
 ) -> tuple[np.ndarray, Fraction]:
@@ -206,16 +137,28 @@ def prepare_block(frames, start, valid, block, *, device, scale=4.0, size=None):
     if start < 0 or len(chunk) != valid or valid < 1 or valid > block:
         raise ValueError("Invalid temporal block.")
     height, width = frames.shape[1:3]
-    srh, srw = size or scaled_size(height, width, scale)
+    size = size or scaled_size(height, width, scale)
+    return block_tensor(enlarge_block(chunk, size), block, device=device)
+
+
+def enlarge_block(chunk: np.ndarray, size, *, pin: bool = False) -> torch.Tensor:
+    """CPU half of prepare_block: bilinear-upsample uint8 frames to size=(H, W).
+
+    Returns contiguous uint8 [1,3,T,H,W], page-locked if pin (for an async upload).
+    """
+    srh, srw = size
     enlarged = np.stack(
         [cv2.resize(f, (srw, srh), interpolation=cv2.INTER_LINEAR) for f in chunk]
     )
-    x = (
-        torch.from_numpy(enlarged)
-        .permute(3, 0, 1, 2)
-        .unsqueeze(0)
-        .to(device=device, dtype=torch.float32)
-    )
+    x = torch.from_numpy(enlarged).permute(3, 0, 1, 2).unsqueeze(0)
+    return x.pin_memory() if pin else x.contiguous()
+
+
+def block_tensor(enlarged: torch.Tensor, block: int, *, device) -> torch.Tensor:
+    """Device half of prepare_block: normalize and pad to the block and token stride."""
+    valid, srh, srw = enlarged.shape[2:]
+    # uint8 -> float32 is exact, so converting after the upload changes nothing.
+    x = enlarged.to(device=device, non_blocking=True).to(torch.float32)
     x = x / 127.5 - 1.0
     if valid < block:
         x = torch.cat((x, x[:, :, -1:].expand(-1, -1, block - valid, -1, -1)), 2)
@@ -264,6 +207,93 @@ class VideoWriter:
         for packet in self.stream.encode():
             self.output.mux(packet)
         self.output.close()
+
+
+def prefetch(items: Iterator, depth: int = 2) -> Iterator:
+    """Produce items on a background thread, up to depth ahead of the consumer.
+
+    Keeps CPU decoding and resizing off the GPU loop's critical path. Producer
+    errors are re-raised in the consumer; closing the consumer stops the producer.
+    """
+    out: queue.Queue = queue.Queue(depth)
+    stop = threading.Event()
+    end = object()
+
+    def put(item) -> bool:
+        while not stop.is_set():
+            try:
+                out.put(item, timeout=0.1)
+                return True
+            except queue.Full:
+                pass
+        return False
+
+    def produce():
+        try:
+            for item in items:
+                if not put((item, None)):
+                    break
+            else:
+                put((end, None))
+        except BaseException as error:
+            put((end, error))
+        finally:
+            if hasattr(items, "close"):
+                items.close()  # e.g. kills a decoder subprocess when stopped early
+
+    thread = threading.Thread(target=produce, daemon=True)
+    thread.start()
+    try:
+        while True:
+            item, error = out.get()
+            if error is not None:
+                raise error
+            if item is end:
+                return
+            yield item
+    finally:
+        stop.set()
+        thread.join()
+
+
+class BackgroundWriter:
+    """A VideoWriter that encodes on its own thread, overlapping GPU work."""
+
+    def __init__(self, writer: VideoWriter, depth: int = 4):
+        self.writer, self.frames = writer, 0
+        self.queue: queue.Queue = queue.Queue(depth)
+        self.error: BaseException | None = None
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def _run(self) -> None:
+        while (frames := self.queue.get()) is not None:
+            if self.error is None:
+                try:
+                    self.writer.write(frames)
+                except BaseException as error:
+                    self.error = error  # keep draining so write() never blocks
+
+    def write(self, frames: np.ndarray) -> None:
+        if self.error is not None:
+            raise self.error
+        self.queue.put(frames)
+        self.frames += len(frames)
+
+    def _finish(self) -> None:
+        self.queue.put(None)
+        self.thread.join()
+
+    def close(self) -> None:
+        self._finish()
+        if self.error is not None:
+            raise self.error
+        self.writer.close()
+
+    def abort(self) -> None:
+        """Stop without flushing; the caller deletes the partial file."""
+        self._finish()
+        self.writer.output.close()
 
 
 def write_video(path: str | Path, frames: np.ndarray, rate: Fraction) -> None:
