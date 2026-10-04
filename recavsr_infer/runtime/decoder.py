@@ -10,6 +10,7 @@ from safetensors.torch import load_file
 from torch import nn
 
 from ..models.autoencoder_kl_wan import AutoencoderKLWan, unpatchify
+from .compat import inductor_options
 
 
 def load_decoder(
@@ -85,13 +86,15 @@ class DecoderSession:
                 self.decode_chunk,
                 fullgraph=True,
                 dynamic=False,
-                options={
-                    **torch._inductor.list_mode_options(compile_mode),
-                    "emulate_precision_casts": True,
-                    "force_same_precision": True,
-                    # Preserve the validated layout for cached causal Conv3d decoding.
-                    "comprehensive_padding": False,
-                },
+                options=inductor_options(
+                    {
+                        **torch._inductor.list_mode_options(compile_mode),
+                        "emulate_precision_casts": True,
+                        "force_same_precision": True,
+                        # Preserve the validated layout for cached causal Conv3d decoding.
+                        "comprehensive_padding": False,
+                    }
+                ),
             )
 
     @torch.inference_mode()

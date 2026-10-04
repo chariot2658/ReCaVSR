@@ -8,7 +8,9 @@ from torch.nn import functional as F
 
 from ..kernels.local_attention import paired_attention, sdpa_attention
 from ..kernels.native_norm import native_layer_norm, native_rms_norm
+from ..weights import load_block
 from .cache import FixedKVCache
+from .compat import inductor_options
 from .constants import (
     BODY_LATENT_FRAMES,
     BODY_RGB_FRAMES,
@@ -19,6 +21,7 @@ from .constants import (
     SPATIAL_TOKEN_STRIDE,
     VAE_SPATIAL_STRIDE,
 )
+from .offload import BlockStreamer, drop_cross_attention_kv
 from .rope import RollingRoPE, apply_rotary
 
 
@@ -136,6 +139,10 @@ class TransformerSession:
 
     Call step consecutively on the prefix and body chunks. Construct a new session
     for a new video or geometry; attention chunks are never independent clips.
+
+    Blocks the loader left on the meta device are streamed through GPU slots. The session
+    consumes the cross-attention K/V projections after precomputing their output,
+    so a model serves one session.
     """
 
     @torch.inference_mode()
@@ -182,16 +189,32 @@ class TransformerSession:
             torch.tensor([INFERENCE_TIMESTEP], device=self.device),
             prompt.to(device=self.device, dtype=self.dtype),
         )
-        self.cores = [
-            PreparedBlock(
-                b,
-                self.conditioning,
-                self.rope,
-                window=window,
-                native_norms=native_norms,
-            ).eval()
-            for b in model.blocks
+        streamed = [
+            i
+            for i, b in enumerate(model.blocks)
+            if b.scale_shift_table.device != self.device
         ]
+        if streamed and self.use_cudagraphs:
+            raise ValueError("Block streaming does not support CUDA-graph modes.")
+        self.streamer = BlockStreamer(model.blocks, streamed, device=self.device)
+        self.cores = []
+        for i, b in enumerate(model.blocks):
+            if i in self.streamer.position:
+                load_block(model, i, device=self.device)
+            self.cores.append(
+                PreparedBlock(
+                    b,
+                    self.conditioning,
+                    self.rope,
+                    window=window,
+                    native_norms=native_norms,
+                ).eval()
+            )
+            drop_cross_attention_kv(b)
+            if i in self.streamer.position:
+                self.streamer.offload(i)
+                torch.cuda.empty_cache()
+        self.streamer.prefetch_initial()
         if compile_blocks:
             # Finite signatures: prefix, capacities 0/1/2/4/6 and distinct fill states.
             torch._dynamo.config.recompile_limit = 64
@@ -200,14 +223,22 @@ class TransformerSession:
                     b,
                     fullgraph=True,
                     dynamic=False,
-                    options={
-                        **torch._inductor.list_mode_options(compile_mode),
-                        "emulate_precision_casts": True,
-                        "force_same_precision": True,
-                    },
+                    options=inductor_options(
+                        {
+                            **torch._inductor.list_mode_options(compile_mode),
+                            "emulate_precision_casts": True,
+                            "force_same_precision": True,
+                        }
+                    ),
                 )
                 for b in self.cores
             ]
+        self.generator = torch.Generator(device=self.device)
+        self.reset(seed)
+
+    def reset(self, seed=42):
+        """Start a new video with the same geometry, keeping prepared blocks."""
+        router = self.model._static_kv_router
         self.caches = [
             FixedKVCache(
                 a,
@@ -217,8 +248,8 @@ class TransformerSession:
             )
             for a in router.layer_actions
         ]
-        self.lq_state = model.lq_proj.create_streaming_state()
-        self.generator = torch.Generator(device=self.device).manual_seed(seed)
+        self.lq_state = self.model.lq_proj.create_streaming_state()
+        self.generator.manual_seed(seed)
         self.latent_offset, self.previous_latents = 0, None
 
     @torch.inference_mode()
@@ -268,9 +299,11 @@ class TransformerSession:
         )
         origin, positions = self.rope.positions(self.latent_offset, frames)
         dummy = hidden.unflatten(2, (m.config.num_attention_heads, -1))
-        for core, cache in zip(self.cores, self.caches):
+        for i, (core, cache) in enumerate(zip(self.cores, self.caches)):
             history = cache.history(dummy, origin=origin)
+            self.streamer.before(i)
             hidden, k, v = core(hidden, *history, positions)
+            self.streamer.after(i)
             cache.commit(k, v, frames=frames, start=self.latent_offset)
         shift, scale = (
             m.scale_shift_table.unsqueeze(0) + self.conditioning.temb.unsqueeze(2)
