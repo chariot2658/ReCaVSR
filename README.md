@@ -94,6 +94,19 @@ uvx hf download kopper/ReCaVSR vae.safetensors --local-dir checkpoints
   attention, KV caches and the decoder keep their original precision. Strip
   intermediates use `.fp8.stripN.mp4` names so BF16 strips are never reused by
   an FP8 run. The original checkpoints are unchanged.
+- `--nvfp4-dit` enables faster, lossy NVFP4 DiT linears on Blackwell GPUs
+  (tested on RTX 5070). It requires a PyTorch build with `_scaled_mm_v2`
+  and compiled blocks. It is mutually exclusive with `--fp8-dit`; omitting
+  both keeps original BF16 calculations. Attention, caches, conditioning and
+  decoder retain their original precision. Intermediates use
+  `.nvfp4.stripN.mp4` names, independently of FP8/BF16 strips. Weights are
+  quantized in memory; the checkpoints are unchanged.
+
+On a 300-frame DVD strip at 4x, NVFP4 reduced combined steady GPU time by
+20.35% versus FP8 (1.256x throughput). Decoded output measured 30.76 dB PSNR
+against FP8, so it is a quality/speed tradeoff, not equivalent output. This
+is a strip benchmark, not a measured full-video wall-time improvement; first
+compilation can outweigh the savings on a short clip.
 
 Input may also be a numbered image directory; use `--fps` to set its playback
 rate. See `uv run python inference.py --help` for the full CLI reference.

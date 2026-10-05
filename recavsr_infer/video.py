@@ -17,7 +17,12 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from .frames import SWS_ACCURATE, ffmpeg_rgb_frames, scaled_size, validate_scale  # noqa: F401
+from .frames import (  # noqa: F401
+    SWS_ACCURATE,
+    ffmpeg_rgb_frames,
+    scaled_size,
+    validate_scale,
+)
 from .runtime.constants import BODY_RGB_FRAMES, PREFIX_RGB_FRAMES, SPATIAL_TOKEN_STRIDE
 
 

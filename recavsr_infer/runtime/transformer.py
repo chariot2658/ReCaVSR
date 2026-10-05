@@ -159,6 +159,7 @@ class TransformerSession:
         compile_mode="default",
         native_norms=False,
         fp8_linears=False,
+        nvfp4_linears=False,
     ):
         if (
             height % SPATIAL_TOKEN_STRIDE
@@ -168,6 +169,8 @@ class TransformerSession:
             raise ValueError("Transformer geometry must be a positive multiple of 32.")
         if len(window) != 2 or min(window) < 1:
             raise ValueError("Spatial windows must be positive.")
+        if fp8_linears and nvfp4_linears:
+            raise ValueError("Choose only one quantized DiT precision.")
         router = model._static_kv_router
         if router is None or len(router.layer_actions) != len(model.blocks):
             raise ValueError(
@@ -212,8 +215,11 @@ class TransformerSession:
                 ).eval()
             )
             drop_cross_attention_kv(b)
-            if fp8_linears:
-                from .fp8 import quantize_block_linears
+            if fp8_linears or nvfp4_linears:
+                if nvfp4_linears:
+                    from .nvfp4 import quantize_block_linears
+                else:
+                    from .fp8 import quantize_block_linears
 
                 quantize_block_linears(b)
             if i in self.streamer.position:

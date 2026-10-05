@@ -17,8 +17,8 @@ import av
 import cv2
 import numpy as np
 
-from .runtime.constants import SPATIAL_TOKEN_STRIDE
 from .frames import ffmpeg_rgb_frames, scaled_size
+from .runtime.constants import SPATIAL_TOKEN_STRIDE
 
 
 def strip_columns(

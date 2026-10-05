@@ -94,10 +94,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=True,
         help="Compile Wan or FlashDecoder (default: enabled).",
     )
-    parser.add_argument(
+    precision = parser.add_mutually_exclusive_group()
+    precision.add_argument(
         "--fp8-dit",
         action="store_true",
         help="Use lossy FP8 DiT linear calculations; attention and decoder keep their precision.",
+    )
+    precision.add_argument(
+        "--nvfp4-dit",
+        action="store_true",
+        help="Use faster, lossy NVFP4 DiT linears on Blackwell; attention and decoder keep their precision.",
     )
     parser.add_argument(
         "--channels-last-decoder",
@@ -218,8 +224,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         )
     if args.compile_mode != "default" and not args.compile_blocks:
         parser.error("--compile-mode requires --compile-blocks.")
-    if args.fp8_dit and not args.compile_blocks:
-        parser.error("--fp8-dit requires --compile-blocks for efficient activation quantization.")
+    if (args.fp8_dit or args.nvfp4_dit) and not args.compile_blocks:
+        parser.error("Quantized DiT modes require --compile-blocks for efficient activation quantization.")
     report_path = args.output.with_suffix(args.output.suffix + ".json")
     if any(path.exists() or path.is_symlink() for path in (args.output, report_path)):
         parser.error("Output or its report already exists; choose a new output path.")
@@ -329,6 +335,10 @@ def main() -> None:
         raise ValueError(f"CUDA device index is out of range: {device.index}")
     if args.fp8_dit and torch.cuda.get_device_capability(device) < (8, 9):
         raise ValueError("FP8 DiT requires an NVIDIA GPU with compute capability 8.9 or later.")
+    if args.nvfp4_dit:
+        from recavsr_infer.runtime.nvfp4 import validate_support
+
+        validate_support(device)
     probe, rate = open_video(args.input, fps=args.fps, limit=1)
     input_height, input_width = next(probe).shape[:2]
     columns = strip_columns(input_width, args.strips, args.strip_overlap, args.scale)
@@ -347,9 +357,10 @@ def main() -> None:
     model_width = width + (-width) % SPATIAL_TOKEN_STRIDE
     report_path = args.output.with_suffix(args.output.suffix + ".json")
     args.output.parent.mkdir(parents=True, exist_ok=True)
+    precision_suffix = ".nvfp4" if args.nvfp4_dit else ".fp8" if args.fp8_dit else ""
     strip_paths = [
         args.output.with_name(
-            f"{args.output.stem}{'.fp8' if args.fp8_dit else ''}.strip{i}{args.output.suffix}"
+            f"{args.output.stem}{precision_suffix}.strip{i}{args.output.suffix}"
         )
         for i in range(len(columns))
     ]
@@ -402,6 +413,7 @@ def main() -> None:
                 compile_blocks=args.compile_blocks,
                 compile_mode=args.compile_mode,
                 fp8_linears=args.fp8_dit,
+                nvfp4_linears=args.nvfp4_dit,
             )
             streamer = transformer.streamer
             streamed, model_blocks = streamer.order, len(model.blocks)
