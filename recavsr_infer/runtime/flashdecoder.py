@@ -10,6 +10,7 @@ import torch
 from safetensors.torch import load_file
 
 from ..models.flashdecoder.flashdecoder_wan22 import FlashDecoder, FlashDecoderState
+from .compat import inductor_options
 
 
 def load_flashdecoder(vae_config, checkpoint_path, *, device="cuda:0"):
@@ -83,14 +84,20 @@ class FlashDecoderSession:
                 self._tensor_step,
                 fullgraph=True,
                 dynamic=False,
-                options={
-                    **torch._inductor.list_mode_options(compile_mode),
-                    "emulate_precision_casts": True,
-                    "force_same_precision": True,
-                    "freezing": True,
-                    "comprehensive_padding": False,
-                },
+                options=inductor_options(
+                    {
+                        **torch._inductor.list_mode_options(compile_mode),
+                        "emulate_precision_casts": True,
+                        "force_same_precision": True,
+                        "freezing": True,
+                        "comprehensive_padding": False,
+                    }
+                ),
             )
+
+    def reset(self):
+        """Start a new video; compiled steps are kept."""
+        self.state = self.model.init_state()
 
     @staticmethod
     def _tensor_step(model, latent_frame, lr_up, backbone, refinement, first):

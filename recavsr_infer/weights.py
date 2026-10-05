@@ -7,9 +7,10 @@ from pathlib import Path
 
 import torch
 from safetensors import safe_open
-from safetensors.torch import load_file
+from torch import nn
 
 from .models.transformer_wan import WanRotaryPosEmbed, WanTransformer3DModel
+from .runtime.offload import streamed_indices
 
 
 def make_model(config: dict, *, meta: bool = False) -> WanTransformer3DModel:
@@ -54,13 +55,62 @@ def validate_package(root: str | Path) -> None:
             raise ValueError(f"DiT checkpoint is missing {prefix} parameters.")
 
 
-def load_model(model_dir: str | Path, *, device="cuda:0") -> WanTransformer3DModel:
-    """Load one complete checkpoint strictly; no adapter merging or key rewriting."""
+def load_model(
+    model_dir: str | Path, *, device="cuda:0", gpu_blocks: int | None = None
+) -> WanTransformer3DModel:
+    """Load one complete checkpoint strictly; no adapter merging or key rewriting.
+
+    Tensors go straight from the file to the device one at a time, so host
+    memory never holds the whole checkpoint. With gpu_blocks, the remaining DiT
+    blocks stay on the meta device; TransformerSession materializes each with
+    load_block and moves it into the streaming arena (see runtime.offload).
+    """
     root = Path(model_dir)
     validate_package(root)
     config = json.loads((root / "model_config.json").read_text())
     model = make_model(config, meta=True)
-    state = load_file(root / "transformer.safetensors")
-    model.load_state_dict(state, strict=True, assign=True)
+    streamed = set()
+    if gpu_blocks is not None:
+        streamed = set(streamed_indices(len(model.blocks), gpu_blocks))
+    path = root / "transformer.safetensors"
+    with safe_open(path, framework="pt") as stream:
+        keys = set(stream.keys())
+        expected = set(model.state_dict().keys())
+        if keys != expected:
+            raise ValueError(
+                f"Checkpoint keys differ from the model: missing "
+                f"{sorted(expected - keys)[:5]}, unexpected {sorted(keys - expected)[:5]}"
+            )
+        state = {
+            key: stream.get_tensor(key).to(device=device, dtype=torch.bfloat16)
+            for key in sorted(keys)
+            if _block_index(key) not in streamed
+        }
+    model.load_state_dict(state, strict=False, assign=True)
     del state
-    return model.to(device=device, dtype=torch.bfloat16).eval().requires_grad_(False)
+    model = model.eval().requires_grad_(False)
+    # Derived buffers (RoPE tables) were built on the CPU.
+    blocks, model.blocks = model.blocks, nn.ModuleList()
+    model.to(device=device)
+    model.blocks = blocks
+    model._checkpoint_path = path
+    return model
+
+
+def _block_index(key: str) -> int | None:
+    return int(key.split(".")[1]) if key.startswith("blocks.") else None
+
+
+def load_block(model: WanTransformer3DModel, index: int, *, device) -> None:
+    """Materialize one meta-device DiT block from the checkpoint onto device."""
+    prefix = f"blocks.{index}."
+    with safe_open(model._checkpoint_path, framework="pt") as stream:
+        state = {
+            key[len(prefix) :]: stream.get_tensor(key).to(
+                device=device, dtype=torch.bfloat16
+            )
+            for key in stream.keys()
+            if key.startswith(prefix)
+        }
+    model.blocks[index].load_state_dict(state, strict=True, assign=True)
+    model.blocks[index].requires_grad_(False)
