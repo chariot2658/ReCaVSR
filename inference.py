@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import math
 import os
@@ -149,6 +150,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=48,
         help="Strip overlap in input (LQ) pixels (default: 48).",
     )
+    parser.add_argument(
+        "--strips-in-one-process",
+        action="store_true",
+        help="With --strips: run every strip in this process, reusing the loaded "
+        "weights and compiled kernels (saves ~25 s per strip). Verified with "
+        "--nvfp4-dit; by default each strip gets a fresh child process.",
+    )
     parser.add_argument("--only-strip", type=int, help=argparse.SUPPRESS)
     parser.add_argument(
         "--no-blend",
@@ -199,6 +207,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--strips and --strip-overlap must be positive.")
     if args.no_blend and args.strips < 2:
         parser.error("--no-blend requires --strips.")
+    if args.strips_in_one_process and args.strips < 2:
+        parser.error("--strips-in-one-process requires --strips.")
     if args.strips > 1 and args.output_size is not None:
         parser.error("--strips uses --scale; set the final size with --resize.")
     if args.resize is not None and min(args.resize) < 1:
@@ -262,7 +272,12 @@ def run_video(blocks, writer, transformer, decoder, args, device, height, width,
     """
     start_time = time.perf_counter()
     staged = (
-        (start, chunk, block, enlarge_block(chunk, (height, width), pin=True))
+        (
+            start,
+            chunk,
+            block,
+            enlarge_block(chunk, (height, width), block=block, pin=True),
+        )
         for start, chunk, block in blocks
     )
     for start, chunk, block, enlarged in prefetch(staged):
@@ -370,10 +385,11 @@ def main() -> None:
     todo = [
         i for i, path in enumerate(strip_paths) if args.strips == 1 or not path.exists()
     ]
-    if args.strips > 1 and args.only_strip is None:
+    if args.strips > 1 and args.only_strip is None and not args.strips_in_one_process:
         # One process per strip: each starts with an unfragmented CUDA allocator
-        # (in-process resets leave pinned segments that push later strips past
-        # free VRAM into slow shared memory).
+        # (with BF16, in-process resets left pinned segments that pushed later
+        # strips past free VRAM into slow shared memory). NVFP4's smaller
+        # footprint resets cleanly, so --strips-in-one-process skips this.
         for i in todo:
             command = [sys.executable, *sys.argv, "--only-strip", str(i)]
             code = subprocess.run(command).returncode
@@ -437,7 +453,10 @@ def main() -> None:
                         vae, compile_decoder=args.compile_decoder
                     )
                 # Return the previous strip's cached blocks to the driver; otherwise
-                # the new strip's caches are allocated beside them and spill.
+                # the new strip's caches are allocated beside them and spill. Part of
+                # the old state is only reachable through reference cycles, so collect
+                # it first (a short strip otherwise kept ~0.3 GiB live, +1 GiB peak).
+                gc.collect()
                 torch.cuda.empty_cache()
                 print(
                     f"strip {i + 1} reset: allocated "
