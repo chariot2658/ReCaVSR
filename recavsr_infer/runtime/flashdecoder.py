@@ -89,7 +89,8 @@ class FlashDecoderSession:
                         **torch._inductor.list_mode_options(compile_mode),
                         "emulate_precision_casts": True,
                         "force_same_precision": True,
-                        "freezing": True,
+                        # No "freezing": AOTAutograd cannot cache frozen graphs, so
+                        # every process recompiled ~20 s. Output is byte-identical.
                         "comprehensive_padding": False,
                     }
                 ),

@@ -143,30 +143,34 @@ def prepare_block(frames, start, valid, block, *, device, scale=4.0, size=None):
         raise ValueError("Invalid temporal block.")
     height, width = frames.shape[1:3]
     size = size or scaled_size(height, width, scale)
-    return block_tensor(enlarge_block(chunk, size), block, device=device)
+    return block_tensor(enlarge_block(chunk, size, block=block), block, device=device)
 
 
-def enlarge_block(chunk: np.ndarray, size, *, pin: bool = False) -> torch.Tensor:
+def enlarge_block(
+    chunk: np.ndarray, size, *, block: int, pin: bool = False
+) -> torch.Tensor:
     """CPU half of prepare_block: bilinear-upsample uint8 frames to size=(H, W).
 
-    Returns contiguous uint8 [1,3,T,H,W], page-locked if pin (for an async upload).
+    A short final chunk is padded to block frames by repeating its last frame.
+    Returns uint8 [1,3,block,H,W], page-locked if pin (for an async upload).
     """
     srh, srw = size
-    enlarged = np.stack(
-        [cv2.resize(f, (srw, srh), interpolation=cv2.INTER_LINEAR) for f in chunk]
-    )
+    frames = [cv2.resize(f, (srw, srh), interpolation=cv2.INTER_LINEAR) for f in chunk]
+    # Pad here, not on the device: every block then reaches the compiled decoder
+    # with the same strides, so the final block does not trigger a recompile.
+    enlarged = np.stack(frames + frames[-1:] * (block - len(frames)))
     x = torch.from_numpy(enlarged).permute(3, 0, 1, 2).unsqueeze(0)
     return x.pin_memory() if pin else x.contiguous()
 
 
 def block_tensor(enlarged: torch.Tensor, block: int, *, device) -> torch.Tensor:
-    """Device half of prepare_block: normalize and pad to the block and token stride."""
-    valid, srh, srw = enlarged.shape[2:]
+    """Device half of prepare_block: normalize and pad to the token stride."""
+    frames, srh, srw = enlarged.shape[2:]
+    if frames != block:
+        raise ValueError("enlarge_block must pad the chunk to the block length.")
     # uint8 -> float32 is exact, so converting after the upload changes nothing.
     x = enlarged.to(device=device, non_blocking=True).to(torch.float32)
     x = x / 127.5 - 1.0
-    if valid < block:
-        x = torch.cat((x, x[:, :, -1:].expand(-1, -1, block - valid, -1, -1)), 2)
     ph, pw = (-srh) % SPATIAL_TOKEN_STRIDE, (-srw) % SPATIAL_TOKEN_STRIDE
     if pw:
         x = F.pad(x, (0, pw, 0, 0, 0, 0), mode="reflect" if pw < srw else "replicate")

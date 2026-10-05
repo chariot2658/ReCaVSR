@@ -262,7 +262,12 @@ def run_video(blocks, writer, transformer, decoder, args, device, height, width,
     """
     start_time = time.perf_counter()
     staged = (
-        (start, chunk, block, enlarge_block(chunk, (height, width), pin=True))
+        (
+            start,
+            chunk,
+            block,
+            enlarge_block(chunk, (height, width), block=block, pin=True),
+        )
         for start, chunk, block in blocks
     )
     for start, chunk, block, enlarged in prefetch(staged):
